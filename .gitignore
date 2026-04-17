@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# Secrets / environment
+.env
+.env.local
+.streamlit/secrets.toml
+
+# Generated synthetic data
+data/synthetic/*.csv
+*.csv
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+*.log
