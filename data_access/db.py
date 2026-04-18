@@ -92,10 +92,8 @@ def get_kpi_snapshot(selected_month: str) -> Dict[str, Any]:
         curr.renewal_unique_pets,
         curr.avg_nbw_premium,
         curr.avg_renewal_premium,
-
         prev.gwp AS prev_gwp,
         py.gwp AS py_gwp,
-
         MAX(CASE WHEN plan_total.metric_name = 'GWP' THEN plan_total.plan_amount END) AS plan_gwp,
         MAX(CASE WHEN plan_total.metric_name = 'NBW_GWP' THEN plan_total.plan_amount END) AS plan_nbw_gwp,
         MAX(CASE WHEN plan_total.metric_name = 'RENEWAL_GWP' THEN plan_total.plan_amount END) AS plan_renewal_gwp,
@@ -126,6 +124,7 @@ def get_kpi_snapshot(selected_month: str) -> Dict[str, Any]:
         return {}
 
     row = df.iloc[0].to_dict()
+    selected_year = pd.to_datetime(selected_month).year
 
     def pct_change(current, base):
         if base is None or pd.isna(base) or base == 0:
@@ -134,73 +133,30 @@ def get_kpi_snapshot(selected_month: str) -> Dict[str, Any]:
 
     row["gwp_mom_pct"] = pct_change(row["gwp"], row["prev_gwp"])
     row["gwp_yoy_pct"] = pct_change(row["gwp"], row["py_gwp"])
-    row["gwp_vs_plan_pct"] = pct_change(row["gwp"], row["plan_gwp"])
-    row["nbw_vs_plan_pct"] = pct_change(row["nbw_gwp"], row["plan_nbw_gwp"])
-    row["renewal_vs_plan_pct"] = pct_change(row["renewal_gwp"], row["plan_renewal_gwp"])
-    row["nbw_unique_pets_vs_plan_pct"] = pct_change(row["nbw_unique_pets"], row["plan_nbw_unique_pets"])
-    row["renewal_unique_pets_vs_plan_pct"] = pct_change(row["renewal_unique_pets"], row["plan_renewal_unique_pets"])
-    row["avg_nbw_vs_plan_pct"] = pct_change(row["avg_nbw_premium"], row["plan_avg_nbw_premium"])
-    row["avg_renewal_vs_plan_pct"] = pct_change(row["avg_renewal_premium"], row["plan_avg_renewal_premium"])
+
+    if selected_year == 2026:
+        row["gwp_vs_plan_pct"] = pct_change(row["gwp"], row["plan_gwp"])
+        row["nbw_vs_plan_pct"] = pct_change(row["nbw_gwp"], row["plan_nbw_gwp"])
+        row["renewal_vs_plan_pct"] = pct_change(row["renewal_gwp"], row["plan_renewal_gwp"])
+        row["nbw_unique_pets_vs_plan_pct"] = pct_change(row["nbw_unique_pets"], row["plan_nbw_unique_pets"])
+        row["renewal_unique_pets_vs_plan_pct"] = pct_change(row["renewal_unique_pets"], row["plan_renewal_unique_pets"])
+        row["avg_nbw_vs_plan_pct"] = pct_change(row["avg_nbw_premium"], row["plan_avg_nbw_premium"])
+        row["avg_renewal_vs_plan_pct"] = pct_change(row["avg_renewal_premium"], row["plan_avg_renewal_premium"])
+    else:
+        row["gwp_vs_plan_pct"] = None
+        row["nbw_vs_plan_pct"] = None
+        row["renewal_vs_plan_pct"] = None
+        row["nbw_unique_pets_vs_plan_pct"] = None
+        row["renewal_unique_pets_vs_plan_pct"] = None
+        row["avg_nbw_vs_plan_pct"] = None
+        row["avg_renewal_vs_plan_pct"] = None
 
     total_unique_pets = (row.get("nbw_unique_pets") or 0) + (row.get("renewal_unique_pets") or 0)
-    if total_unique_pets > 0:
-        row["renewal_pet_share"] = (row.get("renewal_unique_pets") or 0) / total_unique_pets
-    else:
-        row["renewal_pet_share"] = None
-
-    if row.get("gwp") and row["gwp"] != 0:
-        row["nbw_mix_pct"] = (row.get("nbw_gwp") or 0) / row["gwp"]
-        row["renewal_mix_pct"] = (row.get("renewal_gwp") or 0) / row["gwp"]
-    else:
-        row["nbw_mix_pct"] = None
-        row["renewal_mix_pct"] = None
+    row["renewal_pet_share"] = ((row.get("renewal_unique_pets") or 0) / total_unique_pets) if total_unique_pets > 0 else None
+    row["nbw_mix_pct"] = ((row.get("nbw_gwp") or 0) / row["gwp"]) if row.get("gwp") else None
+    row["renewal_mix_pct"] = ((row.get("renewal_gwp") or 0) / row["gwp"]) if row.get("gwp") else None
 
     return row
-
-
-def get_gwp_trend() -> pd.DataFrame:
-    sql = """
-    WITH actuals AS (
-        SELECT
-            month_start,
-            EXTRACT(YEAR FROM month_start)::int AS year_num,
-            gwp
-        FROM vw_monthly_premium_kpis
-    ),
-    forecast_total AS (
-        SELECT
-            forecast_month::date AS month_start,
-            SUM(forecast_amount) AS forecast_gwp
-        FROM fact_forecast
-        WHERE metric_name = 'GWP'
-          AND dimension_type = 'Total'
-        GROUP BY 1
-    ),
-    plan_total AS (
-        SELECT
-            plan_month::date AS month_start,
-            SUM(plan_amount) AS plan_gwp
-        FROM fact_plan
-        WHERE metric_name = 'GWP'
-          AND dimension_type = 'Total'
-        GROUP BY 1
-    )
-    SELECT
-        p.month_start,
-        MAX(CASE WHEN a.year_num = 2024 THEN a.gwp END) AS actual_2024,
-        MAX(CASE WHEN a.year_num = 2025 THEN a.gwp END) AS actual_2025,
-        MAX(CASE WHEN a.year_num = 2026 THEN a.gwp END) AS actual_2026,
-        f.forecast_gwp,
-        p.plan_gwp
-    FROM plan_total p
-    LEFT JOIN actuals a
-        ON a.month_start = p.month_start
-    LEFT JOIN forecast_total f
-        ON f.month_start = p.month_start
-    GROUP BY p.month_start, f.forecast_gwp, p.plan_gwp
-    ORDER BY p.month_start;
-    """
-    return run_query(sql)
 
 
 def get_nbw_renewal_trend() -> pd.DataFrame:
@@ -371,6 +327,164 @@ def get_actual_forecast_vs_plan() -> pd.DataFrame:
     ORDER BY p.month_start;
     """
     return run_query(sql)
+
+
+def get_plan_comparison_2025_2026() -> pd.DataFrame:
+    sql = """
+    WITH actual_2025 AS (
+        SELECT
+            EXTRACT(MONTH FROM month_start)::int AS month_num,
+            SUM(gwp) AS actual_2025_gwp
+        FROM vw_monthly_premium_kpis
+        WHERE EXTRACT(YEAR FROM month_start) = 2025
+        GROUP BY 1
+    ),
+    actual_2026 AS (
+        SELECT
+            EXTRACT(MONTH FROM month_start)::int AS month_num,
+            SUM(gwp) AS actual_2026_gwp
+        FROM vw_monthly_premium_kpis
+        WHERE EXTRACT(YEAR FROM month_start) = 2026
+        GROUP BY 1
+    ),
+    forecast_2026 AS (
+        SELECT
+            EXTRACT(MONTH FROM forecast_month)::int AS month_num,
+            SUM(CASE WHEN metric_name = 'GWP' THEN forecast_amount END) AS forecast_2026_gwp
+        FROM fact_forecast
+        WHERE dimension_type = 'Total'
+        GROUP BY 1
+    ),
+    plan_2026 AS (
+        SELECT
+            EXTRACT(MONTH FROM plan_month)::int AS month_num,
+            SUM(CASE WHEN metric_name = 'GWP' THEN plan_amount END) AS plan_2026_gwp
+        FROM fact_plan
+        WHERE dimension_type = 'Total'
+        GROUP BY 1
+    ),
+    month_lookup AS (
+        SELECT *
+        FROM (VALUES
+            (1, 'Jan'), (2, 'Feb'), (3, 'Mar'), (4, 'Apr'),
+            (5, 'May'), (6, 'Jun'), (7, 'Jul'), (8, 'Aug'),
+            (9, 'Sep'), (10, 'Oct'), (11, 'Nov'), (12, 'Dec')
+        ) AS m(month_num, month_label)
+    )
+    SELECT
+        m.month_num,
+        m.month_label,
+        a25.actual_2025_gwp,
+        p26.plan_2026_gwp,
+        a26.actual_2026_gwp,
+        f26.forecast_2026_gwp,
+        COALESCE(a26.actual_2026_gwp, 0) + COALESCE(f26.forecast_2026_gwp, 0) AS actual_plus_forecast_2026_gwp
+    FROM month_lookup m
+    LEFT JOIN actual_2025 a25 ON m.month_num = a25.month_num
+    LEFT JOIN plan_2026 p26 ON m.month_num = p26.month_num
+    LEFT JOIN actual_2026 a26 ON m.month_num = a26.month_num
+    LEFT JOIN forecast_2026 f26 ON m.month_num = f26.month_num
+    ORDER BY m.month_num;
+    """
+    return run_query(sql)
+
+
+def get_weekly_performance(selected_month: str) -> pd.DataFrame:
+    sql = """
+    WITH weekly_base AS (
+        SELECT
+            DATE_TRUNC('week', "Report Date")::date AS week_start,
+            SUM("Written Amount") AS gwp,
+            SUM(CASE WHEN "TRANS CODE" = 'New Policy Line' THEN "Written Amount" ELSE 0 END) AS nbw_gwp,
+            SUM(CASE WHEN "TRANS CODE" = 'Renew Policy' THEN "Written Amount" ELSE 0 END) AS renewal_gwp,
+            COUNT(DISTINCT CASE
+                WHEN "TRANS CODE" = 'New Policy Line'
+                 AND COALESCE("Returned Pet", 0) <> 1
+                THEN "Pet ID"
+            END) AS nbw_unique_pets,
+            COUNT(DISTINCT CASE
+                WHEN "TRANS CODE" = 'Renew Policy'
+                 AND COALESCE("Returned Pet", 0) <> 1
+                THEN "Pet ID"
+            END) AS renewal_unique_pets
+        FROM fact_written_details
+        WHERE DATE_TRUNC('month', "Report Date")::date = %(selected_month)s::date
+        GROUP BY 1
+    )
+    SELECT
+        week_start,
+        gwp,
+        nbw_gwp,
+        renewal_gwp,
+        nbw_unique_pets,
+        renewal_unique_pets,
+        CASE
+            WHEN nbw_unique_pets = 0 THEN NULL
+            ELSE ROUND(nbw_gwp / nbw_unique_pets, 2)
+        END AS avg_nbw_premium,
+        CASE
+            WHEN renewal_unique_pets = 0 THEN NULL
+            ELSE ROUND(renewal_gwp / renewal_unique_pets, 2)
+        END AS avg_renewal_premium,
+        CASE
+            WHEN gwp = 0 THEN NULL
+            ELSE ROUND(nbw_gwp / gwp, 6)
+        END AS nbw_mix_pct,
+        CASE
+            WHEN gwp = 0 THEN NULL
+            ELSE ROUND(renewal_gwp / gwp, 6)
+        END AS renewal_mix_pct
+    FROM weekly_base
+    ORDER BY week_start;
+    """
+    df = run_query(sql, {"selected_month": selected_month})
+
+    if df.empty:
+        return df
+
+    df = df.sort_values("week_start").reset_index(drop=True)
+
+    for col in ["gwp", "nbw_gwp", "renewal_gwp", "nbw_unique_pets", "renewal_unique_pets"]:
+        df[f"{col}_wow_pct"] = df[col].pct_change()
+
+    return df
+
+
+def get_growth_drivers(selected_month: str) -> pd.DataFrame:
+    sql = """
+    WITH base AS (
+        SELECT
+            "IPH Channel (5)" AS iph_channel_5,
+            SUM("Written Amount") AS total_gwp,
+            SUM(CASE WHEN "TRANS CODE" = 'New Policy Line' THEN "Written Amount" ELSE 0 END) AS nbw_gwp,
+            SUM(CASE WHEN "TRANS CODE" = 'Renew Policy' THEN "Written Amount" ELSE 0 END) AS renewal_gwp,
+            COUNT(DISTINCT CASE
+                WHEN "TRANS CODE" = 'New Policy Line'
+                 AND COALESCE("Returned Pet", 0) <> 1
+                THEN "Pet ID"
+            END) AS nbw_unique_pets,
+            COUNT(DISTINCT CASE
+                WHEN "TRANS CODE" = 'Renew Policy'
+                 AND COALESCE("Returned Pet", 0) <> 1
+                THEN "Pet ID"
+            END) AS renewal_unique_pets
+        FROM fact_written_details
+        WHERE DATE_TRUNC('month', "Report Date")::date = %(selected_month)s::date
+        GROUP BY 1
+    )
+    SELECT
+        iph_channel_5,
+        ROUND(total_gwp, 2) AS total_gwp,
+        ROUND(nbw_gwp, 2) AS nbw_gwp,
+        ROUND(renewal_gwp, 2) AS renewal_gwp,
+        nbw_unique_pets,
+        renewal_unique_pets,
+        CASE WHEN total_gwp = 0 THEN NULL ELSE ROUND(nbw_gwp / total_gwp, 6) END AS nbw_mix_pct,
+        CASE WHEN total_gwp = 0 THEN NULL ELSE ROUND(renewal_gwp / total_gwp, 6) END AS renewal_mix_pct
+    FROM base
+    ORDER BY total_gwp DESC;
+    """
+    return run_query(sql, {"selected_month": selected_month})
 
 
 def get_control_totals() -> Dict[str, Any]:

@@ -12,8 +12,12 @@ from data_access.db import (
     get_channel_mix,
     get_product_mix,
     get_actual_forecast_vs_plan,
+    get_plan_comparison_2025_2026,
+    get_weekly_performance,
+    get_growth_drivers,
     get_control_totals,
 )
+from services.commentary import generate_management_commentary
 
 
 st.set_page_config(
@@ -40,15 +44,13 @@ def fmt_pct(x):
     return f"{x:.1%}"
 
 
+def plan_delta_label(x):
+    if x is None or pd.isna(x):
+        return "2026 Plan only"
+    return f"vs Plan {fmt_pct(x)}"
+
+
 def prepare_exec_trend(actual_df: pd.DataFrame, plan_fcst_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Build a clean Jan-Dec executive trend table with:
-    - 2024 Actual
-    - 2025 Actual
-    - 2026 Actual (Jan-Apr only)
-    - 2026 Forecast (May-Dec only)
-    - 2026 Plan (Jan-Dec)
-    """
     month_lookup = pd.DataFrame({
         "month_num": list(range(1, 13)),
         "month_label": ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -134,6 +136,8 @@ st.sidebar.write("- Unique pet counts")
 st.sidebar.write("- Average premium")
 st.sidebar.write("- State / channel / product mix")
 st.sidebar.write("- Plan and forecast comparison")
+st.sidebar.write("- Weekly performance")
+st.sidebar.write("- Growth drivers / marketing insights")
 
 # Load data
 kpi = get_kpi_snapshot(selected_month)
@@ -142,6 +146,9 @@ top_states = get_top_states(selected_month)
 channel_mix = get_channel_mix(selected_month)
 product_mix = get_product_mix(selected_month)
 actual_fcst_plan = get_actual_forecast_vs_plan()
+plan_comparison = get_plan_comparison_2025_2026()
+weekly_perf = get_weekly_performance(selected_month)
+growth_drivers = get_growth_drivers(selected_month)
 year_split = get_year_split()
 controls = get_control_totals()
 
@@ -153,22 +160,22 @@ st.subheader(f"Executive Summary — {selected_month_display}")
 c1, c2, c3, c4, c5 = st.columns(5)
 
 with c1:
-    st.metric("Total GWP", fmt_currency(kpi.get("gwp")), f"vs Plan {fmt_pct(kpi.get('gwp_vs_plan_pct'))}")
+    st.metric("Total GWP", fmt_currency(kpi.get("gwp")), plan_delta_label(kpi.get("gwp_vs_plan_pct")))
 with c2:
-    st.metric("NBW GWP", fmt_currency(kpi.get("nbw_gwp")), f"vs Plan {fmt_pct(kpi.get('nbw_vs_plan_pct'))}")
+    st.metric("NBW GWP", fmt_currency(kpi.get("nbw_gwp")), plan_delta_label(kpi.get("nbw_vs_plan_pct")))
 with c3:
-    st.metric("Renewal GWP", fmt_currency(kpi.get("renewal_gwp")), f"vs Plan {fmt_pct(kpi.get('renewal_vs_plan_pct'))}")
+    st.metric("Renewal GWP", fmt_currency(kpi.get("renewal_gwp")), plan_delta_label(kpi.get("renewal_vs_plan_pct")))
 with c4:
-    st.metric("NBW Unique Pets", fmt_number(kpi.get("nbw_unique_pets")), f"vs Plan {fmt_pct(kpi.get('nbw_unique_pets_vs_plan_pct'))}")
+    st.metric("NBW Unique Pets", fmt_number(kpi.get("nbw_unique_pets")), plan_delta_label(kpi.get("nbw_unique_pets_vs_plan_pct")))
 with c5:
-    st.metric("Renewal Unique Pets", fmt_number(kpi.get("renewal_unique_pets")), f"vs Plan {fmt_pct(kpi.get('renewal_unique_pets_vs_plan_pct'))}")
+    st.metric("Renewal Unique Pets", fmt_number(kpi.get("renewal_unique_pets")), plan_delta_label(kpi.get("renewal_unique_pets_vs_plan_pct")))
 
 c6, c7, c8, c9, c10 = st.columns(5)
 
 with c6:
-    st.metric("Avg NBW Premium", fmt_currency(kpi.get("avg_nbw_premium")), f"vs Plan {fmt_pct(kpi.get('avg_nbw_vs_plan_pct'))}")
+    st.metric("Avg NBW Premium", fmt_currency(kpi.get("avg_nbw_premium")), plan_delta_label(kpi.get("avg_nbw_vs_plan_pct")))
 with c7:
-    st.metric("Avg Renewal Premium", fmt_currency(kpi.get("avg_renewal_premium")), f"vs Plan {fmt_pct(kpi.get('avg_renewal_vs_plan_pct'))}")
+    st.metric("Avg Renewal Premium", fmt_currency(kpi.get("avg_renewal_premium")), plan_delta_label(kpi.get("avg_renewal_vs_plan_pct")))
 with c8:
     st.metric("GWP MoM %", fmt_pct(kpi.get("gwp_mom_pct")))
 with c9:
@@ -176,11 +183,13 @@ with c9:
 with c10:
     st.metric("Renewal Pet Share", fmt_pct(kpi.get("renewal_pet_share")))
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "Executive Trend",
+    "Weekly Performance",
     "NBW & Renewal",
     "State / Channel Drivers",
     "Plan & Forecast",
+    "Growth Drivers",
     "Management Commentary",
     "Controls"
 ])
@@ -241,12 +250,81 @@ with tab1:
     st.dataframe(year_split_display, width="stretch")
 
 with tab2:
+    st.markdown(f"### Weekly Performance — {selected_month_display}")
+
+    weekly = weekly_perf.copy()
+    if not weekly.empty:
+        weekly["week_start"] = pd.to_datetime(weekly["week_start"])
+
+        best_week_row = weekly.loc[weekly["gwp"].idxmax()]
+        weakest_week_row = weekly.loc[weekly["gwp"].idxmin()]
+        avg_weekly_gwp = weekly["gwp"].mean()
+        best_nbw_row = weekly.loc[weekly["nbw_gwp"].idxmax()]
+        best_renewal_row = weekly.loc[weekly["renewal_gwp"].idxmax()]
+
+        w1, w2, w3, w4, w5 = st.columns(5)
+        with w1:
+            st.metric("Best Week GWP", fmt_currency(best_week_row["gwp"]))
+        with w2:
+            st.metric("Weakest Week GWP", fmt_currency(weakest_week_row["gwp"]))
+        with w3:
+            st.metric("Avg Weekly GWP", fmt_currency(avg_weekly_gwp))
+        with w4:
+            st.metric("Highest NBW Week", best_nbw_row["week_start"].strftime("%Y-%m-%d"))
+        with w5:
+            st.metric("Highest Renewal Week", best_renewal_row["week_start"].strftime("%Y-%m-%d"))
+
+        fig_week = go.Figure()
+        fig_week.add_trace(go.Bar(
+            x=weekly["week_start"], y=weekly["nbw_gwp"], name="Weekly NBW GWP"
+        ))
+        fig_week.add_trace(go.Bar(
+            x=weekly["week_start"], y=weekly["renewal_gwp"], name="Weekly Renewal GWP"
+        ))
+        fig_week.add_trace(go.Scatter(
+            x=weekly["week_start"], y=weekly["gwp"], mode="lines+markers", name="Weekly Total GWP"
+        ))
+        fig_week.update_layout(
+            barmode="group",
+            height=500,
+            xaxis_title="Week Start",
+            yaxis_title="GWP"
+        )
+        st.plotly_chart(fig_week, width="stretch")
+
+        weekly_display = weekly.copy()
+
+        currency_cols = ["gwp", "nbw_gwp", "renewal_gwp", "avg_nbw_premium", "avg_renewal_premium"]
+        number_cols = ["nbw_unique_pets", "renewal_unique_pets"]
+        pct_cols = [
+            "nbw_mix_pct", "renewal_mix_pct",
+            "gwp_wow_pct", "nbw_gwp_wow_pct", "renewal_gwp_wow_pct",
+            "nbw_unique_pets_wow_pct", "renewal_unique_pets_wow_pct"
+        ]
+
+        for col in currency_cols:
+            if col in weekly_display.columns:
+                weekly_display[col] = weekly_display[col].apply(fmt_currency)
+
+        for col in number_cols:
+            if col in weekly_display.columns:
+                weekly_display[col] = weekly_display[col].apply(fmt_number)
+
+        for col in pct_cols:
+            if col in weekly_display.columns:
+                weekly_display[col] = weekly_display[col].apply(fmt_pct)
+
+        st.markdown("### Weekly Detail")
+        st.dataframe(weekly_display, width="stretch")
+    else:
+        st.warning("No weekly data available for the selected month.")
+
+with tab3:
     st.markdown("### NBW vs Renewal GWP Trend")
 
     trend_nr = nbw_trend.copy()
     trend_nr["month_start"] = pd.to_datetime(trend_nr["month_start"])
 
-    # Keep actual data only through Apr 2026
     trend_nr["nbw_gwp_clean"] = trend_nr.apply(
         lambda r: r["nbw_gwp"] if not (r["month_start"].year == 2026 and r["month_start"].month > 4) else None,
         axis=1
@@ -323,7 +401,7 @@ with tab2:
     )
     st.plotly_chart(fig3, width="stretch")
 
-with tab3:
+with tab4:
     left, right = st.columns(2)
 
     with left:
@@ -376,29 +454,57 @@ with tab3:
     )
     st.plotly_chart(fig_product, width="stretch")
 
-with tab4:
-    st.markdown("### Actual + Forecast vs Plan")
+with tab5:
+    st.markdown("### 2025 Actual vs 2026 Plan vs 2026 Actual + Forecast")
 
-    afp = actual_fcst_plan.copy()
-    afp["month_start"] = pd.to_datetime(afp["month_start"])
-    afp["actual_or_forecast_gwp"] = afp["actual_gwp"].fillna(0) + afp["forecast_gwp"].fillna(0)
+    comp = plan_comparison.copy()
+    fig_comp = go.Figure()
 
-    fig_afp = go.Figure()
-    fig_afp.add_trace(go.Bar(
-        x=afp["month_start"], y=afp["plan_gwp"], name="Plan GWP"
+    fig_comp.add_trace(go.Scatter(
+        x=comp["month_label"],
+        y=comp["actual_2025_gwp"],
+        mode="lines+markers",
+        name="2025 Actual"
     ))
-    fig_afp.add_trace(go.Scatter(
-        x=afp["month_start"], y=afp["actual_or_forecast_gwp"],
-        mode="lines+markers", name="Actual + Forecast GWP"
+
+    fig_comp.add_trace(go.Scatter(
+        x=comp["month_label"],
+        y=comp["plan_2026_gwp"],
+        mode="lines+markers",
+        name="2026 Plan"
     ))
-    fig_afp.update_layout(
+
+    fig_comp.add_trace(go.Scatter(
+        x=comp["month_label"],
+        y=comp["actual_plus_forecast_2026_gwp"],
+        mode="lines+markers",
+        name="2026 Actual + Forecast"
+    ))
+
+    fig_comp.update_layout(
         height=500,
         xaxis_title="Month",
         yaxis_title="GWP"
     )
-    st.plotly_chart(fig_afp, width="stretch")
+    st.plotly_chart(fig_comp, width="stretch")
+
+    fy_2025_actual = comp["actual_2025_gwp"].sum(skipna=True)
+    fy_2026_plan = comp["plan_2026_gwp"].sum(skipna=True)
+    fy_2026_af = comp["actual_plus_forecast_2026_gwp"].sum(skipna=True)
+
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        st.metric("FY2025 Actual", fmt_currency(fy_2025_actual))
+    with p2:
+        st.metric("FY2026 Plan", fmt_currency(fy_2026_plan))
+    with p3:
+        st.metric("FY2026 Actual + Forecast", fmt_currency(fy_2026_af))
 
     st.markdown("### Monthly Plan / Forecast Detail")
+
+    afp = actual_fcst_plan.copy()
+    afp["month_start"] = pd.to_datetime(afp["month_start"])
+    afp["actual_or_forecast_gwp"] = afp["actual_gwp"].fillna(0) + afp["forecast_gwp"].fillna(0)
     afp_display = afp.copy()
 
     currency_cols = [
@@ -424,31 +530,115 @@ with tab4:
 
     st.dataframe(afp_display, width="stretch")
 
-with tab5:
-    st.markdown("### Draft Management Commentary")
+with tab6:
+    st.markdown("### Growth Drivers / Channel Insights")
 
-    commentary = f"""
-### {selected_month_display} Summary
+    gd = growth_drivers.copy()
+    gd_top = gd.head(5).copy()
 
-- Total GWP for the month is **{fmt_currency(kpi.get('gwp'))}**, with month-over-month movement of **{fmt_pct(kpi.get('gwp_mom_pct'))}** and year-over-year movement of **{fmt_pct(kpi.get('gwp_yoy_pct'))}**.
-- NBW GWP is **{fmt_currency(kpi.get('nbw_gwp'))}**, while Renewal GWP is **{fmt_currency(kpi.get('renewal_gwp'))}**.
-- NBW Unique Pets are **{fmt_number(kpi.get('nbw_unique_pets'))}**, and Renewal Unique Pets are **{fmt_number(kpi.get('renewal_unique_pets'))}**.
-- Average NBW Premium is **{fmt_currency(kpi.get('avg_nbw_premium'))}**, while Average Renewal Premium is **{fmt_currency(kpi.get('avg_renewal_premium'))}**.
-- GWP versus plan is **{fmt_pct(kpi.get('gwp_vs_plan_pct'))}**, with NBW versus plan at **{fmt_pct(kpi.get('nbw_vs_plan_pct'))}** and Renewal versus plan at **{fmt_pct(kpi.get('renewal_vs_plan_pct'))}**.
-- Renewal Pet Share currently stands at **{fmt_pct(kpi.get('renewal_pet_share'))}** and should be treated as a **synthetic proxy indicator**, not an official retention measure.
+    left, right = st.columns(2)
 
-### Management Focus Areas
+    with left:
+        st.markdown("### Top Channels by Total GWP")
+        fig_gd_total = px.bar(
+            gd_top.sort_values("total_gwp", ascending=False),
+            x="iph_channel_5",
+            y="total_gwp"
+        )
+        fig_gd_total.update_layout(
+            height=450,
+            xaxis_title="Channel",
+            yaxis_title="Total GWP"
+        )
+        st.plotly_chart(fig_gd_total, width="stretch")
 
-- Review whether current GWP performance is primarily driven by **new business** or **renewals**.
-- Review the **top states** and **channel mix** to identify concentration and growth drivers.
-- Compare **2026 actuals plus forecast** against the **full-year plan** to assess expected finish.
-- Use this synthetic workflow as a prototype for how an internal insurance FP&A assistant could support **management-call preparation**.
-"""
-    st.markdown(commentary)
+    with right:
+        st.markdown("### NBW vs Renewal Mix by Top Channels")
+        fig_gd_mix = go.Figure()
+        fig_gd_mix.add_trace(go.Bar(
+            x=gd_top["iph_channel_5"],
+            y=gd_top["nbw_gwp"],
+            name="NBW GWP"
+        ))
+        fig_gd_mix.add_trace(go.Bar(
+            x=gd_top["iph_channel_5"],
+            y=gd_top["renewal_gwp"],
+            name="Renewal GWP"
+        ))
+        fig_gd_mix.update_layout(
+            barmode="group",
+            height=450,
+            xaxis_title="Channel",
+            yaxis_title="GWP"
+        )
+        st.plotly_chart(fig_gd_mix, width="stretch")
+
+    st.markdown("### Growth Driver Detail")
+    gd_display = gd.copy()
+    gd_display["total_gwp"] = gd_display["total_gwp"].apply(fmt_currency)
+    gd_display["nbw_gwp"] = gd_display["nbw_gwp"].apply(fmt_currency)
+    gd_display["renewal_gwp"] = gd_display["renewal_gwp"].apply(fmt_currency)
+    gd_display["nbw_unique_pets"] = gd_display["nbw_unique_pets"].apply(fmt_number)
+    gd_display["renewal_unique_pets"] = gd_display["renewal_unique_pets"].apply(fmt_number)
+    gd_display["nbw_mix_pct"] = gd_display["nbw_mix_pct"].apply(fmt_pct)
+    gd_display["renewal_mix_pct"] = gd_display["renewal_mix_pct"].apply(fmt_pct)
+    st.dataframe(gd_display, width="stretch")
+
+with tab7:
+    st.markdown("### Management Commentary")
+
+    cache_key = f"commentary::{selected_month}"
+
+    if cache_key not in st.session_state:
+        default_text, default_source = generate_management_commentary(
+            selected_month_display=selected_month_display,
+            kpi=kpi,
+            top_states=top_states,
+            channel_mix=channel_mix,
+            use_ai=False
+        )
+        st.session_state[cache_key] = {
+            "text": default_text,
+            "source": default_source
+        }
+
+    btn_col1, btn_col2 = st.columns([1, 1])
+
+    with btn_col1:
+        if st.button("Generate AI Commentary", key=f"generate_ai_{selected_month}"):
+            with st.spinner("Generating commentary with AWS Bedrock..."):
+                text, source = generate_management_commentary(
+                    selected_month_display=selected_month_display,
+                    kpi=kpi,
+                    top_states=top_states,
+                    channel_mix=channel_mix,
+                    use_ai=True
+                )
+                st.session_state[cache_key] = {
+                    "text": text,
+                    "source": source
+                }
+
+    with btn_col2:
+        if st.button("Use Default Commentary", key=f"use_default_{selected_month}"):
+            text, source = generate_management_commentary(
+                selected_month_display=selected_month_display,
+                kpi=kpi,
+                top_states=top_states,
+                channel_mix=channel_mix,
+                use_ai=False
+            )
+            st.session_state[cache_key] = {
+                "text": text,
+                "source": source
+            }
+
+    st.caption(f"Commentary source: {st.session_state[cache_key]['source']}")
+    st.markdown(st.session_state[cache_key]["text"])
 
     st.info("Retention-style metrics shown here are synthetic proxy indicators for demonstration purposes.")
 
-with tab6:
+with tab8:
     st.markdown("### Source and Control Information")
     st.write("Source tables used:")
     for t in controls["source_tables"]:
