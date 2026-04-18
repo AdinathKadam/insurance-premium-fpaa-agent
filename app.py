@@ -17,7 +17,10 @@ from data_access.db import (
     get_growth_drivers,
     get_control_totals,
 )
-from services.commentary import generate_management_commentary
+from services.commentary import (
+    generate_management_commentary,
+    generate_assistant_answer,
+)
 
 
 st.set_page_config(
@@ -138,6 +141,7 @@ st.sidebar.write("- State / channel / product mix")
 st.sidebar.write("- Plan and forecast comparison")
 st.sidebar.write("- Weekly performance")
 st.sidebar.write("- Growth drivers / marketing insights")
+st.sidebar.write("- AI assistants")
 
 # Load data
 kpi = get_kpi_snapshot(selected_month)
@@ -183,7 +187,7 @@ with c9:
 with c10:
     st.metric("Renewal Pet Share", fmt_pct(kpi.get("renewal_pet_share")))
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "Executive Trend",
     "Weekly Performance",
     "NBW & Renewal",
@@ -191,6 +195,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "Plan & Forecast",
     "Growth Drivers",
     "Management Commentary",
+    "AI Assistants",
     "Controls"
 ])
 
@@ -639,6 +644,77 @@ with tab7:
     st.info("Retention-style metrics shown here are synthetic proxy indicators for demonstration purposes.")
 
 with tab8:
+    st.markdown("### AI Assistants")
+
+    assistant_choice = st.selectbox(
+        "Choose Assistant",
+        [
+            "Variance Assistant",
+            "Weekly Performance Assistant",
+            "Growth Drivers Assistant",
+            "Management Call Assistant"
+        ]
+    )
+
+    assistant_map = {
+        "Variance Assistant": "variance",
+        "Weekly Performance Assistant": "weekly",
+        "Growth Drivers Assistant": "growth",
+        "Management Call Assistant": "management"
+    }
+
+    sample_questions = {
+        "Variance Assistant": [
+            "Why is this month above or below plan?",
+            "Is the variance driven more by NBW or Renewal?",
+            "Which states or channels are the biggest variance drivers?"
+        ],
+        "Weekly Performance Assistant": [
+            "What changed week over week?",
+            "Which week was strongest and which was weakest?",
+            "Was this month more acquisition-led or renewal-led week to week?"
+        ],
+        "Growth Drivers Assistant": [
+            "Which channels are driving growth?",
+            "Which states or products are strongest this month?",
+            "Which channels have the highest NBW mix?"
+        ],
+        "Management Call Assistant": [
+            "Summarize this month for leadership.",
+            "What should management focus on?",
+            "What are the main risks or watchouts?"
+        ]
+    }
+
+    st.markdown("#### Suggested Questions")
+    for q in sample_questions[assistant_choice]:
+        st.write(f"- {q}")
+
+    default_question = sample_questions[assistant_choice][0]
+    user_question = st.text_area(
+        "Ask a question",
+        value=default_question,
+        height=120
+    )
+
+    if st.button("Generate Assistant Answer"):
+        with st.spinner("Generating AI answer..."):
+            answer, source = generate_assistant_answer(
+                assistant_type=assistant_map[assistant_choice],
+                user_question=user_question,
+                selected_month_display=selected_month_display,
+                kpi=kpi,
+                weekly_perf=weekly_perf,
+                top_states=top_states,
+                channel_mix=channel_mix,
+                product_mix=product_mix,
+                growth_drivers=growth_drivers,
+                plan_comparison=plan_comparison
+            )
+            st.caption(f"Assistant source: {source}")
+            st.markdown(answer)
+
+with tab9:
     st.markdown("### Source and Control Information")
     st.write("Source tables used:")
     for t in controls["source_tables"]:

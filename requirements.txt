@@ -4,3 +4,4 @@ numpy
 python-dotenv
 psycopg2-binary
 plotly
+boto3
