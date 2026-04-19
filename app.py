@@ -7,6 +7,7 @@ from data_access.db import (
     get_available_months,
     get_year_split,
     get_kpi_snapshot,
+    get_ytd_snapshot,
     get_nbw_renewal_trend,
     get_top_states,
     get_channel_mix,
@@ -21,7 +22,6 @@ from services.commentary import (
     generate_management_commentary,
     generate_assistant_answer,
 )
-
 
 st.set_page_config(
     page_title="Insurance Premium FP&A Decision Support Assistant",
@@ -130,21 +130,30 @@ selected_month = st.sidebar.selectbox(
     index=default_index
 )
 
-selected_month_display = pd.to_datetime(selected_month).strftime("%B %Y")
+selected_month_dt = pd.to_datetime(selected_month)
+selected_month_display = selected_month_dt.strftime("%B %Y")
+
+ytd_start = pd.Timestamp(year=selected_month_dt.year, month=1, day=1)
+ytd_end = selected_month_dt + pd.offsets.MonthEnd(0)
+
+st.sidebar.markdown("### Derived Date Logic")
+st.sidebar.write(f"YTD Start: {ytd_start.date()}")
+st.sidebar.write(f"YTD End: {ytd_end.date()}")
 
 st.sidebar.markdown("### Demo Scope")
 st.sidebar.write("- GWP")
 st.sidebar.write("- NBW / Renewal")
 st.sidebar.write("- Unique pet counts")
 st.sidebar.write("- Average premium")
+st.sidebar.write("- Weekly, Monthly, YTD")
 st.sidebar.write("- State / channel / product mix")
 st.sidebar.write("- Plan and forecast comparison")
-st.sidebar.write("- Weekly performance")
 st.sidebar.write("- Growth drivers / marketing insights")
 st.sidebar.write("- AI assistants")
 
 # Load data
 kpi = get_kpi_snapshot(selected_month)
+ytd_kpi = get_ytd_snapshot(selected_month)
 nbw_trend = get_nbw_renewal_trend()
 top_states = get_top_states(selected_month)
 channel_mix = get_channel_mix(selected_month)
@@ -158,7 +167,7 @@ controls = get_control_totals()
 
 exec_trend = prepare_exec_trend(nbw_trend, actual_fcst_plan)
 
-# KPI cards
+# Executive summary cards
 st.subheader(f"Executive Summary — {selected_month_display}")
 
 c1, c2, c3, c4, c5 = st.columns(5)
@@ -187,10 +196,11 @@ with c9:
 with c10:
     st.metric("Renewal Pet Share", fmt_pct(kpi.get("renewal_pet_share")))
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "Executive Trend",
     "Weekly Performance",
     "NBW & Renewal",
+    "YTD Overview",
     "State / Channel Drivers",
     "Plan & Forecast",
     "Growth Drivers",
@@ -260,6 +270,7 @@ with tab2:
     weekly = weekly_perf.copy()
     if not weekly.empty:
         weekly["week_start"] = pd.to_datetime(weekly["week_start"])
+        weekly["week_label"] = weekly["week_start"].dt.strftime("%b %d, %Y").str.replace(" 0", " ", regex=False)
 
         best_week_row = weekly.loc[weekly["gwp"].idxmax()]
         weakest_week_row = weekly.loc[weekly["gwp"].idxmin()]
@@ -275,29 +286,38 @@ with tab2:
         with w3:
             st.metric("Avg Weekly GWP", fmt_currency(avg_weekly_gwp))
         with w4:
-            st.metric("Highest NBW Week", best_nbw_row["week_start"].strftime("%Y-%m-%d"))
+            st.metric("Highest NBW Week", best_nbw_row["week_label"])
         with w5:
-            st.metric("Highest Renewal Week", best_renewal_row["week_start"].strftime("%Y-%m-%d"))
+            st.metric("Highest Renewal Week", best_renewal_row["week_label"])
 
         fig_week = go.Figure()
         fig_week.add_trace(go.Bar(
-            x=weekly["week_start"], y=weekly["nbw_gwp"], name="Weekly NBW GWP"
+            x=weekly["week_label"],
+            y=weekly["nbw_gwp"],
+            name="Weekly NBW GWP"
         ))
         fig_week.add_trace(go.Bar(
-            x=weekly["week_start"], y=weekly["renewal_gwp"], name="Weekly Renewal GWP"
+            x=weekly["week_label"],
+            y=weekly["renewal_gwp"],
+            name="Weekly Renewal GWP"
         ))
         fig_week.add_trace(go.Scatter(
-            x=weekly["week_start"], y=weekly["gwp"], mode="lines+markers", name="Weekly Total GWP"
+            x=weekly["week_label"],
+            y=weekly["gwp"],
+            mode="lines+markers",
+            name="Weekly Total GWP"
         ))
         fig_week.update_layout(
             barmode="group",
             height=500,
             xaxis_title="Week Start",
-            yaxis_title="GWP"
+            yaxis_title="GWP",
+            xaxis=dict(type="category")
         )
         st.plotly_chart(fig_week, width="stretch")
 
         weekly_display = weekly.copy()
+        weekly_display["week_start"] = weekly_display["week_start"].dt.strftime("%Y-%m-%d")
 
         currency_cols = ["gwp", "nbw_gwp", "renewal_gwp", "avg_nbw_premium", "avg_renewal_premium"]
         number_cols = ["nbw_unique_pets", "renewal_unique_pets"]
@@ -407,6 +427,64 @@ with tab3:
     st.plotly_chart(fig3, width="stretch")
 
 with tab4:
+    st.markdown(f"### YTD Overview — {selected_month_dt.year} through {selected_month_display}")
+
+    y1, y2, y3, y4, y5 = st.columns(5)
+
+    with y1:
+        st.metric("YTD GWP", fmt_currency(ytd_kpi.get("gwp")), plan_delta_label(ytd_kpi.get("gwp_vs_plan_pct")))
+    with y2:
+        st.metric("YTD NBW GWP", fmt_currency(ytd_kpi.get("nbw_gwp")), plan_delta_label(ytd_kpi.get("nbw_vs_plan_pct")))
+    with y3:
+        st.metric("YTD Renewal GWP", fmt_currency(ytd_kpi.get("renewal_gwp")), plan_delta_label(ytd_kpi.get("renewal_vs_plan_pct")))
+    with y4:
+        st.metric("YTD NBW Unique Pets", fmt_number(ytd_kpi.get("nbw_unique_pets")))
+    with y5:
+        st.metric("YTD Renewal Unique Pets", fmt_number(ytd_kpi.get("renewal_unique_pets")))
+
+    y6, y7, y8, y9 = st.columns(4)
+
+    with y6:
+        st.metric("YTD Avg NBW Premium", fmt_currency(ytd_kpi.get("avg_nbw_premium")))
+    with y7:
+        st.metric("YTD Avg Renewal Premium", fmt_currency(ytd_kpi.get("avg_renewal_premium")))
+    with y8:
+        st.metric("YTD YoY %", fmt_pct(ytd_kpi.get("gwp_yoy_pct")))
+    with y9:
+        st.metric("YTD Renewal Pet Share", fmt_pct(ytd_kpi.get("renewal_pet_share")))
+
+    ytd_compare_df = pd.DataFrame({
+        "metric": ["GWP", "NBW GWP", "Renewal GWP"],
+        "YTD Actual": [
+            ytd_kpi.get("gwp"),
+            ytd_kpi.get("nbw_gwp"),
+            ytd_kpi.get("renewal_gwp"),
+        ],
+        "YTD Plan": [
+            ytd_kpi.get("plan_gwp"),
+            ytd_kpi.get("plan_nbw_gwp"),
+            ytd_kpi.get("plan_renewal_gwp"),
+        ],
+        "Prior YTD": [
+            ytd_kpi.get("py_gwp"),
+            ytd_kpi.get("py_nbw_gwp"),
+            ytd_kpi.get("py_renewal_gwp"),
+        ]
+    })
+
+    fig_ytd = go.Figure()
+    fig_ytd.add_trace(go.Bar(name="YTD Actual", x=ytd_compare_df["metric"], y=ytd_compare_df["YTD Actual"]))
+    fig_ytd.add_trace(go.Bar(name="YTD Plan", x=ytd_compare_df["metric"], y=ytd_compare_df["YTD Plan"]))
+    fig_ytd.add_trace(go.Bar(name="Prior YTD", x=ytd_compare_df["metric"], y=ytd_compare_df["Prior YTD"]))
+    fig_ytd.update_layout(
+        barmode="group",
+        height=450,
+        xaxis_title="Metric",
+        yaxis_title="Value"
+    )
+    st.plotly_chart(fig_ytd, width="stretch")
+
+with tab5:
     left, right = st.columns(2)
 
     with left:
@@ -459,7 +537,7 @@ with tab4:
     )
     st.plotly_chart(fig_product, width="stretch")
 
-with tab5:
+with tab6:
     st.markdown("### 2025 Actual vs 2026 Plan vs 2026 Actual + Forecast")
 
     comp = plan_comparison.copy()
@@ -535,7 +613,7 @@ with tab5:
 
     st.dataframe(afp_display, width="stretch")
 
-with tab6:
+with tab7:
     st.markdown("### Growth Drivers / Channel Insights")
 
     gd = growth_drivers.copy()
@@ -589,7 +667,7 @@ with tab6:
     gd_display["renewal_mix_pct"] = gd_display["renewal_mix_pct"].apply(fmt_pct)
     st.dataframe(gd_display, width="stretch")
 
-with tab7:
+with tab8:
     st.markdown("### Management Commentary")
 
     cache_key = f"commentary::{selected_month}"
@@ -643,7 +721,7 @@ with tab7:
 
     st.info("Retention-style metrics shown here are synthetic proxy indicators for demonstration purposes.")
 
-with tab8:
+with tab9:
     st.markdown("### AI Assistants")
 
     assistant_choice = st.selectbox(
@@ -714,7 +792,7 @@ with tab8:
             st.caption(f"Assistant source: {source}")
             st.markdown(answer)
 
-with tab9:
+with tab10:
     st.markdown("### Source and Control Information")
     st.write("Source tables used:")
     for t in controls["source_tables"]:
