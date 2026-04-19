@@ -57,6 +57,12 @@ def get_year_split() -> pd.DataFrame:
     return run_query(sql)
 
 
+def _pct_change(current, base):
+    if base is None or pd.isna(base) or base == 0:
+        return None
+    return (current - base) / base
+
+
 def get_kpi_snapshot(selected_month: str) -> Dict[str, Any]:
     sql = """
     WITH curr AS (
@@ -126,22 +132,17 @@ def get_kpi_snapshot(selected_month: str) -> Dict[str, Any]:
     row = df.iloc[0].to_dict()
     selected_year = pd.to_datetime(selected_month).year
 
-    def pct_change(current, base):
-        if base is None or pd.isna(base) or base == 0:
-            return None
-        return (current - base) / base
-
-    row["gwp_mom_pct"] = pct_change(row["gwp"], row["prev_gwp"])
-    row["gwp_yoy_pct"] = pct_change(row["gwp"], row["py_gwp"])
+    row["gwp_mom_pct"] = _pct_change(row["gwp"], row["prev_gwp"])
+    row["gwp_yoy_pct"] = _pct_change(row["gwp"], row["py_gwp"])
 
     if selected_year == 2026:
-        row["gwp_vs_plan_pct"] = pct_change(row["gwp"], row["plan_gwp"])
-        row["nbw_vs_plan_pct"] = pct_change(row["nbw_gwp"], row["plan_nbw_gwp"])
-        row["renewal_vs_plan_pct"] = pct_change(row["renewal_gwp"], row["plan_renewal_gwp"])
-        row["nbw_unique_pets_vs_plan_pct"] = pct_change(row["nbw_unique_pets"], row["plan_nbw_unique_pets"])
-        row["renewal_unique_pets_vs_plan_pct"] = pct_change(row["renewal_unique_pets"], row["plan_renewal_unique_pets"])
-        row["avg_nbw_vs_plan_pct"] = pct_change(row["avg_nbw_premium"], row["plan_avg_nbw_premium"])
-        row["avg_renewal_vs_plan_pct"] = pct_change(row["avg_renewal_premium"], row["plan_avg_renewal_premium"])
+        row["gwp_vs_plan_pct"] = _pct_change(row["gwp"], row["plan_gwp"])
+        row["nbw_vs_plan_pct"] = _pct_change(row["nbw_gwp"], row["plan_nbw_gwp"])
+        row["renewal_vs_plan_pct"] = _pct_change(row["renewal_gwp"], row["plan_renewal_gwp"])
+        row["nbw_unique_pets_vs_plan_pct"] = _pct_change(row["nbw_unique_pets"], row["plan_nbw_unique_pets"])
+        row["renewal_unique_pets_vs_plan_pct"] = _pct_change(row["renewal_unique_pets"], row["plan_renewal_unique_pets"])
+        row["avg_nbw_vs_plan_pct"] = _pct_change(row["avg_nbw_premium"], row["plan_avg_nbw_premium"])
+        row["avg_renewal_vs_plan_pct"] = _pct_change(row["avg_renewal_premium"], row["plan_avg_renewal_premium"])
     else:
         row["gwp_vs_plan_pct"] = None
         row["nbw_vs_plan_pct"] = None
@@ -155,6 +156,104 @@ def get_kpi_snapshot(selected_month: str) -> Dict[str, Any]:
     row["renewal_pet_share"] = ((row.get("renewal_unique_pets") or 0) / total_unique_pets) if total_unique_pets > 0 else None
     row["nbw_mix_pct"] = ((row.get("nbw_gwp") or 0) / row["gwp"]) if row.get("gwp") else None
     row["renewal_mix_pct"] = ((row.get("renewal_gwp") or 0) / row["gwp"]) if row.get("gwp") else None
+
+    return row
+
+
+def get_ytd_snapshot(selected_month: str) -> Dict[str, Any]:
+    sql = """
+    WITH params AS (
+        SELECT
+            %(selected_month)s::date AS selected_month,
+            DATE_TRUNC('year', %(selected_month)s::date)::date AS ytd_start,
+            (%(selected_month)s::date + INTERVAL '1 month' - INTERVAL '1 day')::date AS ytd_end,
+            (DATE_TRUNC('year', %(selected_month)s::date) - INTERVAL '1 year')::date AS py_ytd_start,
+            ((%(selected_month)s::date + INTERVAL '1 month' - INTERVAL '1 day') - INTERVAL '1 year')::date AS py_ytd_end
+    ),
+    actual_ytd AS (
+        SELECT
+            SUM("Written Amount") AS gwp,
+            SUM(CASE WHEN "TRANS CODE" = 'New Policy Line' THEN "Written Amount" ELSE 0 END) AS nbw_gwp,
+            SUM(CASE WHEN "TRANS CODE" = 'Renew Policy' THEN "Written Amount" ELSE 0 END) AS renewal_gwp,
+            COUNT(DISTINCT CASE
+                WHEN "TRANS CODE" = 'New Policy Line'
+                 AND COALESCE("Returned Pet", 0) <> 1
+                THEN "Pet ID"
+            END) AS nbw_unique_pets,
+            COUNT(DISTINCT CASE
+                WHEN "TRANS CODE" = 'Renew Policy'
+                 AND COALESCE("Returned Pet", 0) <> 1
+                THEN "Pet ID"
+            END) AS renewal_unique_pets
+        FROM fact_written_details f
+        CROSS JOIN params p
+        WHERE f."Report Date"::date BETWEEN p.ytd_start AND p.ytd_end
+    ),
+    py_ytd AS (
+        SELECT
+            SUM("Written Amount") AS py_gwp,
+            SUM(CASE WHEN "TRANS CODE" = 'New Policy Line' THEN "Written Amount" ELSE 0 END) AS py_nbw_gwp,
+            SUM(CASE WHEN "TRANS CODE" = 'Renew Policy' THEN "Written Amount" ELSE 0 END) AS py_renewal_gwp
+        FROM fact_written_details f
+        CROSS JOIN params p
+        WHERE f."Report Date"::date BETWEEN p.py_ytd_start AND p.py_ytd_end
+    ),
+    plan_ytd AS (
+        SELECT
+            SUM(CASE WHEN metric_name = 'GWP' THEN plan_amount END) AS plan_gwp,
+            SUM(CASE WHEN metric_name = 'NBW_GWP' THEN plan_amount END) AS plan_nbw_gwp,
+            SUM(CASE WHEN metric_name = 'RENEWAL_GWP' THEN plan_amount END) AS plan_renewal_gwp
+        FROM fact_plan fp
+        CROSS JOIN params p
+        WHERE fp.dimension_type = 'Total'
+          AND fp.plan_month::date BETWEEN p.ytd_start AND p.ytd_end
+    )
+    SELECT
+        a.gwp,
+        a.nbw_gwp,
+        a.renewal_gwp,
+        a.nbw_unique_pets,
+        a.renewal_unique_pets,
+        CASE
+            WHEN a.nbw_unique_pets = 0 THEN NULL
+            ELSE ROUND(a.nbw_gwp / a.nbw_unique_pets, 2)
+        END AS avg_nbw_premium,
+        CASE
+            WHEN a.renewal_unique_pets = 0 THEN NULL
+            ELSE ROUND(a.renewal_gwp / a.renewal_unique_pets, 2)
+        END AS avg_renewal_premium,
+        py.py_gwp,
+        py.py_nbw_gwp,
+        py.py_renewal_gwp,
+        p.plan_gwp,
+        p.plan_nbw_gwp,
+        p.plan_renewal_gwp
+    FROM actual_ytd a
+    CROSS JOIN py_ytd py
+    CROSS JOIN plan_ytd p;
+    """
+
+    df = run_query(sql, {"selected_month": selected_month})
+
+    if df.empty:
+        return {}
+
+    row = df.iloc[0].to_dict()
+    selected_year = pd.to_datetime(selected_month).year
+
+    row["gwp_yoy_pct"] = _pct_change(row["gwp"], row["py_gwp"])
+
+    if selected_year == 2026:
+        row["gwp_vs_plan_pct"] = _pct_change(row["gwp"], row["plan_gwp"])
+        row["nbw_vs_plan_pct"] = _pct_change(row["nbw_gwp"], row["plan_nbw_gwp"])
+        row["renewal_vs_plan_pct"] = _pct_change(row["renewal_gwp"], row["plan_renewal_gwp"])
+    else:
+        row["gwp_vs_plan_pct"] = None
+        row["nbw_vs_plan_pct"] = None
+        row["renewal_vs_plan_pct"] = None
+
+    total_unique_pets = (row.get("nbw_unique_pets") or 0) + (row.get("renewal_unique_pets") or 0)
+    row["renewal_pet_share"] = ((row.get("renewal_unique_pets") or 0) / total_unique_pets) if total_unique_pets > 0 else None
 
     return row
 
