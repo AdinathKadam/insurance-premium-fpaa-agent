@@ -5,17 +5,21 @@ import plotly.graph_objects as go
 
 from data_access.db import (
     get_available_months,
+    get_date_bounds,
     get_year_split,
-    get_kpi_snapshot,
+    get_kpi_snapshot_range,
     get_ytd_snapshot,
     get_nbw_renewal_trend,
-    get_top_states,
-    get_channel_mix,
-    get_product_mix,
+    get_top_states_range,
+    get_channel_mix_range,
+    get_product_mix_range,
     get_actual_forecast_vs_plan,
+    get_actual_plan_forecast_range,
     get_plan_comparison_2025_2026,
-    get_weekly_performance,
-    get_growth_drivers,
+    get_weekly_performance_range,
+    get_drilldown_table,
+    get_nbw_renewal_drilldown_range,
+    get_growth_drivers_range,
     get_control_totals,
 )
 from services.commentary import (
@@ -49,8 +53,86 @@ def fmt_pct(x):
 
 def plan_delta_label(x):
     if x is None or pd.isna(x):
-        return "2026 Plan only"
+        return "vs Plan —"
     return f"vs Plan {fmt_pct(x)}"
+
+
+def dataframe_to_csv(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def add_csv_download(df: pd.DataFrame, label: str, file_name: str):
+    st.download_button(
+        label=label,
+        data=dataframe_to_csv(df),
+        file_name=file_name,
+        mime="text/csv",
+        use_container_width=True
+    )
+
+
+def format_reporting_table(df: pd.DataFrame) -> pd.DataFrame:
+    display_df = df.copy()
+
+    date_cols = ["month_start", "week_start"]
+    for col in date_cols:
+        if col in display_df.columns:
+            display_df[col] = pd.to_datetime(display_df[col]).dt.strftime("%Y-%m-%d")
+
+    if "drilldown_group" in display_df.columns:
+        try:
+            converted = pd.to_datetime(display_df["drilldown_group"], errors="coerce")
+            if converted.notna().mean() > 0.8:
+                display_df["drilldown_group"] = converted.dt.strftime("%Y-%m-%d")
+            else:
+                display_df["drilldown_group"] = display_df["drilldown_group"].astype(str)
+        except Exception:
+            display_df["drilldown_group"] = display_df["drilldown_group"].astype(str)
+
+    currency_cols = [
+        "actual_gwp", "actual_nbw_gwp", "actual_renewal_gwp",
+        "plan_gwp", "plan_nbw_gwp", "plan_renewal_gwp",
+        "forecast_gwp", "forecast_nbw_gwp", "forecast_renewal_gwp",
+        "actual_plus_forecast_gwp", "actual_vs_plan_gwp",
+        "gwp", "nbw_gwp", "renewal_gwp",
+        "avg_nbw_premium", "avg_renewal_premium", "avg_premium",
+        "total_gwp", "current_gwp", "py_gwp"
+    ]
+
+    number_cols = [
+        "actual_nbw_unique_pets", "actual_renewal_unique_pets",
+        "plan_nbw_unique_pets", "plan_renewal_unique_pets",
+        "forecast_nbw_unique_pets", "forecast_renewal_unique_pets",
+        "nbw_unique_pets", "renewal_unique_pets",
+        "unique_pets", "row_count"
+    ]
+
+    pct_cols = [
+        "actual_vs_plan_pct",
+        "share_pct",
+        "nbw_mix_pct",
+        "renewal_mix_pct",
+        "yoy_pct",
+        "gwp_wow_pct",
+        "nbw_gwp_wow_pct",
+        "renewal_gwp_wow_pct",
+        "nbw_unique_pets_wow_pct",
+        "renewal_unique_pets_wow_pct"
+    ]
+
+    for col in currency_cols:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].apply(fmt_currency)
+
+    for col in number_cols:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].apply(fmt_number)
+
+    for col in pct_cols:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].apply(fmt_pct)
+
+    return display_df
 
 
 def prepare_exec_trend(actual_df: pd.DataFrame, plan_fcst_df: pd.DataFrame) -> pd.DataFrame:
@@ -115,60 +197,88 @@ def prepare_exec_trend(actual_df: pd.DataFrame, plan_fcst_df: pd.DataFrame) -> p
 st.title("Insurance Premium FP&A Decision Support Assistant")
 st.caption("Synthetic demo only. No company financial, policyholder, claims, operational, or internal data used.")
 
-# Sidebar
 st.sidebar.header("Control Panel")
 
 months_df = get_available_months()
 month_options = months_df["month_start"].astype(str).tolist()
 
-default_month = "2026-04-01"
-default_index = month_options.index(default_month) if default_month in month_options else len(month_options) - 1
+date_bounds = get_date_bounds()
 
-selected_month = st.sidebar.selectbox(
-    "Select Reporting Month",
-    month_options,
-    index=default_index
+if not date_bounds.empty:
+    min_available_date = pd.to_datetime(date_bounds.iloc[0]["min_date"]).date()
+    max_available_date = pd.to_datetime(date_bounds.iloc[0]["max_date"]).date()
+else:
+    min_available_date = pd.Timestamp("2026-01-01").date()
+    max_available_date = pd.Timestamp("2026-04-30").date()
+
+default_start_candidate = pd.Timestamp("2026-01-01").date()
+default_start_date = max(default_start_candidate, min_available_date)
+default_end_date = max_available_date
+
+st.sidebar.markdown("### Analysis Date Range")
+
+analysis_start_date = st.sidebar.date_input(
+    "Start Date",
+    value=default_start_date,
+    min_value=min_available_date,
+    max_value=max_available_date
 )
 
-selected_month_dt = pd.to_datetime(selected_month)
+analysis_end_date = st.sidebar.date_input(
+    "End Date",
+    value=default_end_date,
+    min_value=min_available_date,
+    max_value=max_available_date
+)
+
+if analysis_start_date > analysis_end_date:
+    st.sidebar.error("Start Date cannot be after End Date.")
+    st.stop()
+
+analysis_start_str = analysis_start_date.strftime("%Y-%m-%d")
+analysis_end_str = analysis_end_date.strftime("%Y-%m-%d")
+
+selected_month_dt = pd.Timestamp(analysis_end_date).replace(day=1)
+selected_month = selected_month_dt.strftime("%Y-%m-%d")
 selected_month_display = selected_month_dt.strftime("%B %Y")
 
-ytd_start = pd.Timestamp(year=selected_month_dt.year, month=1, day=1)
-ytd_end = selected_month_dt + pd.offsets.MonthEnd(0)
+st.sidebar.caption(f"Active range: {analysis_start_str} to {analysis_end_str}")
 
-st.sidebar.markdown("### Derived Date Logic")
-st.sidebar.write(f"YTD Start: {ytd_start.date()}")
-st.sidebar.write(f"YTD End: {ytd_end.date()}")
+st.sidebar.markdown("### Date Logic")
+st.sidebar.write(f"Analysis Start: {analysis_start_str}")
+st.sidebar.write(f"Analysis End: {analysis_end_str}")
+st.sidebar.write("Actuals use exact Report Date.")
+st.sidebar.write("Plan and forecast use monthly grain.")
 
 st.sidebar.markdown("### Demo Scope")
 st.sidebar.write("- GWP")
 st.sidebar.write("- NBW / Renewal")
 st.sidebar.write("- Unique pet counts")
 st.sidebar.write("- Average premium")
-st.sidebar.write("- Weekly, Monthly, YTD")
-st.sidebar.write("- State / channel / product mix")
+st.sidebar.write("- Weekly and date-range analysis")
+st.sidebar.write("- State / channel / product / vendor drilldown")
 st.sidebar.write("- Plan and forecast comparison")
-st.sidebar.write("- Growth drivers / marketing insights")
+st.sidebar.write("- Management commentary")
 st.sidebar.write("- AI assistants")
 
-# Load data
-kpi = get_kpi_snapshot(selected_month)
+kpi = get_kpi_snapshot_range(analysis_start_str, analysis_end_str)
 ytd_kpi = get_ytd_snapshot(selected_month)
+
 nbw_trend = get_nbw_renewal_trend()
-top_states = get_top_states(selected_month)
-channel_mix = get_channel_mix(selected_month)
-product_mix = get_product_mix(selected_month)
+top_states = get_top_states_range(analysis_start_str, analysis_end_str)
+channel_mix = get_channel_mix_range(analysis_start_str, analysis_end_str)
+product_mix = get_product_mix_range(analysis_start_str, analysis_end_str)
 actual_fcst_plan = get_actual_forecast_vs_plan()
+range_actual_plan_forecast = get_actual_plan_forecast_range(analysis_start_str, analysis_end_str)
 plan_comparison = get_plan_comparison_2025_2026()
-weekly_perf = get_weekly_performance(selected_month)
-growth_drivers = get_growth_drivers(selected_month)
+weekly_perf = get_weekly_performance_range(analysis_start_str, analysis_end_str)
+growth_drivers = get_growth_drivers_range(analysis_start_str, analysis_end_str)
 year_split = get_year_split()
 controls = get_control_totals()
 
 exec_trend = prepare_exec_trend(nbw_trend, actual_fcst_plan)
 
-# Executive summary cards
-st.subheader(f"Executive Summary — {selected_month_display}")
+st.subheader(f"Executive Summary — {analysis_start_str} to {analysis_end_str}")
 
 c1, c2, c3, c4, c5 = st.columns(5)
 
@@ -186,13 +296,13 @@ with c5:
 c6, c7, c8, c9, c10 = st.columns(5)
 
 with c6:
-    st.metric("Avg NBW Premium", fmt_currency(kpi.get("avg_nbw_premium")), plan_delta_label(kpi.get("avg_nbw_vs_plan_pct")))
+    st.metric("Avg NBW Premium", fmt_currency(kpi.get("avg_nbw_premium")))
 with c7:
-    st.metric("Avg Renewal Premium", fmt_currency(kpi.get("avg_renewal_premium")), plan_delta_label(kpi.get("avg_renewal_vs_plan_pct")))
+    st.metric("Avg Renewal Premium", fmt_currency(kpi.get("avg_renewal_premium")))
 with c8:
-    st.metric("GWP MoM %", fmt_pct(kpi.get("gwp_mom_pct")))
+    st.metric("NBW Mix %", fmt_pct(kpi.get("nbw_mix_pct")))
 with c9:
-    st.metric("GWP YoY %", fmt_pct(kpi.get("gwp_yoy_pct")))
+    st.metric("Renewal Mix %", fmt_pct(kpi.get("renewal_mix_pct")))
 with c10:
     st.metric("Renewal Pet Share", fmt_pct(kpi.get("renewal_pet_share")))
 
@@ -211,6 +321,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
 
 with tab1:
     st.markdown("### GWP Trend: 2024 Actual, 2025 Actual, 2026 Actual, Forecast, and Plan")
+    st.caption("This chart remains a full-year executive trend view. Date range controls the drilldown table below.")
 
     fig = go.Figure()
 
@@ -258,6 +369,31 @@ with tab1:
 
     st.plotly_chart(fig, width="stretch")
 
+    st.markdown("### Executive Trend Drilldown Table")
+    executive_drill_group = st.selectbox(
+        "Select table drilldown level",
+        ["Week", "Channel", "State", "Product", "Vendor"],
+        key="tab1_executive_drill_group"
+    )
+
+    executive_drill_df = get_drilldown_table(
+        start_date=analysis_start_str,
+        end_date=analysis_end_str,
+        group_by=executive_drill_group
+    )
+
+    if not executive_drill_df.empty:
+        executive_drill_display = format_reporting_table(executive_drill_df)
+        st.dataframe(executive_drill_display, width="stretch")
+
+        add_csv_download(
+            executive_drill_display,
+            label="Download Executive Trend Drilldown CSV",
+            file_name=f"executive_drilldown_{executive_drill_group.lower()}_{analysis_start_str}_to_{analysis_end_str}.csv"
+        )
+    else:
+        st.warning("No executive drilldown data available for the selected date range.")
+
     st.markdown("### Year Split Validation")
     year_split_display = year_split.copy()
     year_split_display["row_count"] = year_split_display["row_count"].apply(fmt_number)
@@ -265,7 +401,7 @@ with tab1:
     st.dataframe(year_split_display, width="stretch")
 
 with tab2:
-    st.markdown(f"### Weekly Performance — {selected_month_display}")
+    st.markdown(f"### Weekly Performance — {analysis_start_str} to {analysis_end_str}")
 
     weekly = weekly_perf.copy()
     if not weekly.empty:
@@ -316,35 +452,78 @@ with tab2:
         )
         st.plotly_chart(fig_week, width="stretch")
 
-        weekly_display = weekly.copy()
-        weekly_display["week_start"] = weekly_display["week_start"].dt.strftime("%Y-%m-%d")
-
-        currency_cols = ["gwp", "nbw_gwp", "renewal_gwp", "avg_nbw_premium", "avg_renewal_premium"]
-        number_cols = ["nbw_unique_pets", "renewal_unique_pets"]
-        pct_cols = [
-            "nbw_mix_pct", "renewal_mix_pct",
-            "gwp_wow_pct", "nbw_gwp_wow_pct", "renewal_gwp_wow_pct",
-            "nbw_unique_pets_wow_pct", "renewal_unique_pets_wow_pct"
-        ]
-
-        for col in currency_cols:
-            if col in weekly_display.columns:
-                weekly_display[col] = weekly_display[col].apply(fmt_currency)
-
-        for col in number_cols:
-            if col in weekly_display.columns:
-                weekly_display[col] = weekly_display[col].apply(fmt_number)
-
-        for col in pct_cols:
-            if col in weekly_display.columns:
-                weekly_display[col] = weekly_display[col].apply(fmt_pct)
-
         st.markdown("### Weekly Detail")
+        weekly_display = format_reporting_table(weekly)
         st.dataframe(weekly_display, width="stretch")
+
+        add_csv_download(
+            weekly_display,
+            label="Download Weekly Detail CSV",
+            file_name=f"weekly_detail_{analysis_start_str}_to_{analysis_end_str}.csv"
+        )
+
+        st.markdown("### Weekly Drilldown")
+        weekly_drill_group = st.selectbox(
+            "Select weekly drilldown level",
+            ["Channel", "Vendor", "State", "Product", "Week"],
+            key="tab2_weekly_drill_group"
+        )
+
+        weekly_drill_df = get_drilldown_table(
+            start_date=analysis_start_str,
+            end_date=analysis_end_str,
+            group_by=weekly_drill_group
+        )
+
+        if not weekly_drill_df.empty:
+            weekly_drill_display = format_reporting_table(weekly_drill_df)
+            st.dataframe(weekly_drill_display, width="stretch")
+
+            add_csv_download(
+                weekly_drill_display,
+                label="Download Weekly Drilldown CSV",
+                file_name=f"weekly_drilldown_{weekly_drill_group.lower()}_{analysis_start_str}_to_{analysis_end_str}.csv"
+            )
+        else:
+            st.warning("No weekly drilldown data available for the selected date range.")
     else:
-        st.warning("No weekly data available for the selected month.")
+        st.warning("No weekly data available for the selected date range.")
 
 with tab3:
+    st.markdown("### Table-Based NBW / Renewal Drilldown")
+    st.caption(f"Filtered range: {analysis_start_str} to {analysis_end_str}")
+
+    drill_metric = st.selectbox(
+        "Select metric",
+        ["NBW", "Renewal", "Total GWP"],
+        key="nbw_renewal_drill_metric"
+    )
+
+    drill_dimension = st.selectbox(
+        "Drill down by",
+        ["Channel", "Vendor", "State", "Product", "Week"],
+        key="nbw_renewal_drill_dimension"
+    )
+
+    nbw_renewal_drill = get_nbw_renewal_drilldown_range(
+        start_date=analysis_start_str,
+        end_date=analysis_end_str,
+        metric=drill_metric,
+        group_by=drill_dimension
+    )
+
+    if not nbw_renewal_drill.empty:
+        nbw_renewal_drill_display = format_reporting_table(nbw_renewal_drill)
+        st.dataframe(nbw_renewal_drill_display, width="stretch")
+
+        add_csv_download(
+            nbw_renewal_drill_display,
+            label="Download NBW / Renewal Drilldown CSV",
+            file_name=f"{drill_metric.lower().replace(' ', '_')}_by_{drill_dimension.lower()}_{analysis_start_str}_to_{analysis_end_str}.csv"
+        )
+    else:
+        st.warning("No NBW / Renewal drilldown data available for the selected date range.")
+
     st.markdown("### NBW vs Renewal GWP Trend")
 
     trend_nr = nbw_trend.copy()
@@ -428,6 +607,7 @@ with tab3:
 
 with tab4:
     st.markdown(f"### YTD Overview — {selected_month_dt.year} through {selected_month_display}")
+    st.caption("YTD view uses the analysis end date year. The main executive KPIs above are controlled by the selected date range.")
 
     y1, y2, y3, y4, y5 = st.columns(5)
 
@@ -516,13 +696,15 @@ with tab5:
         )
         st.plotly_chart(fig_channel, width="stretch")
 
-    st.markdown("### State YoY Table")
-    top_states_display = top_states.copy()
-    top_states_display["current_gwp"] = top_states_display["current_gwp"].apply(fmt_currency)
-    top_states_display["py_gwp"] = top_states_display["py_gwp"].apply(fmt_currency)
-    top_states_display["yoy_pct"] = top_states_display["yoy_pct"].apply(fmt_pct)
-    top_states_display["share_pct"] = top_states_display["share_pct"].apply(fmt_pct)
+    st.markdown("### State Table")
+    top_states_display = format_reporting_table(top_states)
     st.dataframe(top_states_display, width="stretch")
+
+    add_csv_download(
+        top_states_display,
+        label="Download State Table CSV",
+        file_name=f"state_table_{analysis_start_str}_to_{analysis_end_str}.csv"
+    )
 
     st.markdown("### Product Mix")
     fig_product = px.bar(
@@ -537,7 +719,49 @@ with tab5:
     )
     st.plotly_chart(fig_product, width="stretch")
 
+    st.markdown("### Table-Based Drilldown Details")
+    st.caption(f"Filtered range: {analysis_start_str} to {analysis_end_str}")
+
+    drill_group = st.selectbox(
+        "Select table drilldown level",
+        ["Week", "State", "Channel", "Vendor", "Product"],
+        key="tab5_drill_group"
+    )
+
+    drill_df = get_drilldown_table(
+        start_date=analysis_start_str,
+        end_date=analysis_end_str,
+        group_by=drill_group
+    )
+
+    if not drill_df.empty:
+        drill_display = format_reporting_table(drill_df)
+        st.dataframe(drill_display, width="stretch")
+
+        add_csv_download(
+            drill_display,
+            label="Download Current Drilldown CSV",
+            file_name=f"drilldown_{drill_group.lower()}_{analysis_start_str}_to_{analysis_end_str}.csv"
+        )
+    else:
+        st.warning("No drilldown data available for the selected date range.")
+
 with tab6:
+    st.markdown("### Actual / Plan / Forecast — Selected Date Range")
+    st.caption(f"Filtered range: {analysis_start_str} to {analysis_end_str}")
+
+    if not range_actual_plan_forecast.empty:
+        range_apf_display = format_reporting_table(range_actual_plan_forecast)
+        st.dataframe(range_apf_display, width="stretch")
+
+        add_csv_download(
+            range_apf_display,
+            label="Download Filtered Actual / Plan / Forecast CSV",
+            file_name=f"actual_plan_forecast_{analysis_start_str}_to_{analysis_end_str}.csv"
+        )
+    else:
+        st.warning("No Actual / Plan / Forecast data available for the selected date range.")
+
     st.markdown("### 2025 Actual vs 2026 Plan vs 2026 Actual + Forecast")
 
     comp = plan_comparison.copy()
@@ -583,38 +807,9 @@ with tab6:
     with p3:
         st.metric("FY2026 Actual + Forecast", fmt_currency(fy_2026_af))
 
-    st.markdown("### Monthly Plan / Forecast Detail")
-
-    afp = actual_fcst_plan.copy()
-    afp["month_start"] = pd.to_datetime(afp["month_start"])
-    afp["actual_or_forecast_gwp"] = afp["actual_gwp"].fillna(0) + afp["forecast_gwp"].fillna(0)
-    afp_display = afp.copy()
-
-    currency_cols = [
-        "actual_gwp", "actual_nbw_gwp", "actual_renewal_gwp",
-        "forecast_gwp", "forecast_nbw_gwp", "forecast_renewal_gwp",
-        "plan_gwp", "plan_nbw_gwp", "plan_renewal_gwp",
-        "actual_or_forecast_gwp"
-    ]
-
-    number_cols = [
-        "actual_nbw_unique_pets", "actual_renewal_unique_pets",
-        "forecast_nbw_unique_pets", "forecast_renewal_unique_pets",
-        "plan_nbw_unique_pets", "plan_renewal_unique_pets"
-    ]
-
-    for col in currency_cols:
-        if col in afp_display.columns:
-            afp_display[col] = afp_display[col].apply(fmt_currency)
-
-    for col in number_cols:
-        if col in afp_display.columns:
-            afp_display[col] = afp_display[col].apply(fmt_number)
-
-    st.dataframe(afp_display, width="stretch")
-
 with tab7:
     st.markdown("### Growth Drivers / Channel Insights")
+    st.caption(f"Filtered range: {analysis_start_str} to {analysis_end_str}")
 
     gd = growth_drivers.copy()
     gd_top = gd.head(5).copy()
@@ -657,18 +852,18 @@ with tab7:
         st.plotly_chart(fig_gd_mix, width="stretch")
 
     st.markdown("### Growth Driver Detail")
-    gd_display = gd.copy()
-    gd_display["total_gwp"] = gd_display["total_gwp"].apply(fmt_currency)
-    gd_display["nbw_gwp"] = gd_display["nbw_gwp"].apply(fmt_currency)
-    gd_display["renewal_gwp"] = gd_display["renewal_gwp"].apply(fmt_currency)
-    gd_display["nbw_unique_pets"] = gd_display["nbw_unique_pets"].apply(fmt_number)
-    gd_display["renewal_unique_pets"] = gd_display["renewal_unique_pets"].apply(fmt_number)
-    gd_display["nbw_mix_pct"] = gd_display["nbw_mix_pct"].apply(fmt_pct)
-    gd_display["renewal_mix_pct"] = gd_display["renewal_mix_pct"].apply(fmt_pct)
+    gd_display = format_reporting_table(gd)
     st.dataframe(gd_display, width="stretch")
+
+    add_csv_download(
+        gd_display,
+        label="Download Growth Driver CSV",
+        file_name=f"growth_drivers_{analysis_start_str}_to_{analysis_end_str}.csv"
+    )
 
 with tab8:
     st.markdown("### Management Commentary")
+    st.caption("Commentary still uses the analysis end month as a monthly management view. Date-range commentary can be added later.")
 
     cache_key = f"commentary::{selected_month}"
 
@@ -723,6 +918,7 @@ with tab8:
 
 with tab9:
     st.markdown("### AI Assistants")
+    st.caption("AI assistants use the currently filtered business context where available.")
 
     assistant_choice = st.selectbox(
         "Choose Assistant",
@@ -743,22 +939,22 @@ with tab9:
 
     sample_questions = {
         "Variance Assistant": [
-            "Why is this month above or below plan?",
+            "Why is this period above or below plan?",
             "Is the variance driven more by NBW or Renewal?",
             "Which states or channels are the biggest variance drivers?"
         ],
         "Weekly Performance Assistant": [
             "What changed week over week?",
             "Which week was strongest and which was weakest?",
-            "Was this month more acquisition-led or renewal-led week to week?"
+            "Was this period more acquisition-led or renewal-led week to week?"
         ],
         "Growth Drivers Assistant": [
             "Which channels are driving growth?",
-            "Which states or products are strongest this month?",
+            "Which states or products are strongest in this period?",
             "Which channels have the highest NBW mix?"
         ],
         "Management Call Assistant": [
-            "Summarize this month for leadership.",
+            "Summarize this period for leadership.",
             "What should management focus on?",
             "What are the main risks or watchouts?"
         ]
@@ -780,7 +976,7 @@ with tab9:
             answer, source = generate_assistant_answer(
                 assistant_type=assistant_map[assistant_choice],
                 user_question=user_question,
-                selected_month_display=selected_month_display,
+                selected_month_display=f"{analysis_start_str} to {analysis_end_str}",
                 kpi=kpi,
                 weekly_perf=weekly_perf,
                 top_states=top_states,
